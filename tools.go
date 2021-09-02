@@ -40,21 +40,12 @@ func cancelClose() {
 	}
 }
 
-func createPixbuf(icon string, size int) (*gdk.Pixbuf, error) {
-	iconTheme, err := gtk.IconThemeGetDefault()
-	if err != nil {
-		log.Fatal("Couldn't get default theme: ", err)
+func createPixbuf(icon string, size int, iconTheme *gtk.IconTheme) (*gdk.Pixbuf, error) {
+	if strings.Contains(icon, "/") {
+		return gdk.PixbufNewFromFileAtSize(icon, size, size)
 	}
 
-	if strings.Contains(icon, "/") {
-		pixbuf, err := gdk.PixbufNewFromFileAtSize(icon, size, size)
-		if err != nil {
-			println(fmt.Sprintf("%s", err))
-			return nil, err
-		}
-		return pixbuf, nil
-
-	} else if strings.HasSuffix(icon, ".svg") || strings.HasSuffix(icon, ".png") || strings.HasSuffix(icon, ".xpm") {
+	if strings.HasSuffix(icon, ".svg") || strings.HasSuffix(icon, ".png") || strings.HasSuffix(icon, ".xpm") {
 		// for entries like "Icon=netflix-desktop.svg"
 		icon = strings.Split(icon, ".")[0]
 	}
@@ -62,19 +53,12 @@ func createPixbuf(icon string, size int) (*gdk.Pixbuf, error) {
 	pixbuf, err := iconTheme.LoadIcon(icon, size, gtk.ICON_LOOKUP_FORCE_SIZE)
 
 	if err != nil {
+		log.Println("failed to load icon from theme", err)
 		if strings.HasPrefix(icon, "/") {
-			pixbuf, err := gdk.PixbufNewFromFileAtSize(icon, size, size)
-			if err != nil {
-				return nil, err
-			}
-			return pixbuf, nil
+			return gdk.PixbufNewFromFileAtSize(icon, size, size)
 		}
 
-		pixbuf, err := iconTheme.LoadIcon(icon, size, gtk.ICON_LOOKUP_FORCE_SIZE)
-		if err != nil {
-			return nil, err
-		}
-		return pixbuf, nil
+		return iconTheme.LoadIcon(icon, size, gtk.ICON_LOOKUP_FORCE_SIZE)
 	}
 	return pixbuf, nil
 }
@@ -370,13 +354,13 @@ func parseDesktopFiles(desktopFiles []string) string {
 		}
 
 		id2entry[entry.DesktopID] = entry
-		desktopEntries = append(desktopEntries, entry)
+		deindex = append(deindex, entry)
 		assignToLists(entry.DesktopID, entry.Category)
 	}
-	sort.Slice(desktopEntries, func(i, j int) bool {
-		return desktopEntries[i].NameLoc < desktopEntries[j].NameLoc
+	sort.Slice(deindex, func(i, j int) bool {
+		return deindex[i].NameLoc < deindex[j].NameLoc
 	})
-	summary := fmt.Sprintf("%v entries (+%v hidden)", len(desktopEntries)-hidden, hidden)
+	summary := fmt.Sprintf("%v entries (+%v hidden)", len(deindex)-hidden, hidden)
 	println(fmt.Sprintf("Skipped %v duplicates; %v .desktop entries hidden by \"NoDisplay=true\"", skipped, hidden))
 	return summary
 }

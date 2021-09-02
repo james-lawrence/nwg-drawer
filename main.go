@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/allan-simon/go-singleinstance"
+
 	"github.com/dlasky/gotk3-layershell/layershell"
 	"github.com/gotk3/gotk3/gdk"
 	"github.com/gotk3/gotk3/glib"
@@ -77,7 +78,7 @@ var (
 	listOther              []string
 )
 
-var desktopEntries []desktopEntry
+var deindex []desktopEntry
 
 // UI elements
 var (
@@ -197,6 +198,7 @@ func main() {
 	println(fmt.Sprintf("Found %v desktop files", len(desktopFiles)))
 
 	status = parseDesktopFiles(desktopFiles)
+	userDirsMap = mapXdgUserDirs()
 
 	// For opening files we use xdg-open. As its configuration is PITA, we may override some associations
 	// in the ~/.config/nwg-panel/preferred-apps.json file.
@@ -211,6 +213,11 @@ func main() {
 	// USER INTERFACE
 	gtk.Init(nil)
 
+	// cache missing icon.
+	missingIcon, err = gtk.ImageNewFromIconName("image-missing", gtk.ICON_SIZE_INVALID)
+	if err != nil {
+		log.Println("unable to create missing icon", err)
+	}
 	cssProvider, _ := gtk.CssProviderNew()
 
 	err = cssProvider.LoadFromPath(cssFile)
@@ -356,7 +363,8 @@ func main() {
 
 	appSearchResultWrapper, _ = gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 0)
 	resultsWrapper.PackStart(appSearchResultWrapper, false, false, 0)
-	appFlowBox = setUpAppsFlowBox(nil, "")
+
+	appFlowBox = filterApplications(deindex, func(entry desktopEntry) bool { return true })
 
 	// Focus 1st pinned item if any, otherwise focus 1st found app icon
 	var button gtk.IWidget
@@ -368,8 +376,6 @@ func main() {
 	if err == nil {
 		button.ToWidget().GrabFocus()
 	}
-
-	userDirsMap = mapXdgUserDirs()
 
 	placeholder, _ := gtk.BoxNew(gtk.ORIENTATION_VERTICAL, 0)
 	resultsWrapper.PackStart(placeholder, true, true, 0)
@@ -388,6 +394,13 @@ func main() {
 	statusLabel, _ = gtk.LabelNew(status)
 	statusLineWrapper.PackStart(statusLabel, true, false, 0)
 
+	win.Connect(cachedIconsSignal.String(), func(window *gtk.Window) bool {
+		log.Println("ICON CACHE WARM REFRESHING")
+		appFlowBox = filterApplications(deindex, func(entry desktopEntry) bool { return true })
+		return true
+	})
+	go warmIconCache(win, deindex...)
+
 	win.ShowAll()
 	if !*noFS {
 		fileSearchResultWrapper.SetSizeRequest(appFlowBox.GetAllocatedWidth(), 1)
@@ -397,7 +410,6 @@ func main() {
 		categoriesWrapper.SetSizeRequest(1, categoriesWrapper.GetAllocatedHeight()*2)
 	}
 
-	t := time.Now()
-	println(fmt.Sprintf("UI created in %v ms. Thank you for your patience.", t.Sub(timeStart).Milliseconds()))
+	println(fmt.Sprintf("UI created in %v ms. Thank you for your patience.", time.Since(timeStart)))
 	gtk.Main()
 }

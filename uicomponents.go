@@ -3,14 +3,21 @@ package main
 import (
 	"fmt"
 	"io/fs"
+	"log"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gotk3/gotk3/gdk"
+	"github.com/gotk3/gotk3/glib"
 	"github.com/gotk3/gotk3/gtk"
 )
 
 func setUpPinnedFlowBox() *gtk.FlowBox {
+	iconTheme, err := gtk.IconThemeGetDefault()
+	if err != nil {
+		log.Fatal("Couldn't get default theme: ", err)
+	}
 	if pinnedFlowBox != nil {
 		pinnedFlowBox.Destroy()
 	}
@@ -35,7 +42,7 @@ func setUpPinnedFlowBox() *gtk.FlowBox {
 
 			var img *gtk.Image
 			if entry.Icon != "" {
-				pixbuf, _ := createPixbuf(entry.Icon, *iconSize)
+				pixbuf, _ := createPixbuf(entry.Icon, *iconSize, iconTheme)
 				img, _ = gtk.ImageNewFromPixbuf(pixbuf)
 			} else {
 				img, _ = gtk.ImageNewFromIconName("image-missing", gtk.ICON_SIZE_INVALID)
@@ -117,7 +124,9 @@ func setUpCategoriesButtonBox() *gtk.EventBox {
 	button.SetProperty("name", "category-button")
 	button.Connect("clicked", func(item *gtk.Button) {
 		searchEntry.SetText("")
-		appFlowBox = setUpAppsFlowBox(nil, "")
+		appFlowBox = filterApplications(deindex, func(e desktopEntry) bool {
+			return true
+		})
 		for _, btn := range catButtons {
 			btn.SetImagePosition(gtk.POS_LEFT)
 			btn.SetSizeRequest(0, 0)
@@ -139,7 +148,9 @@ func setUpCategoriesButtonBox() *gtk.EventBox {
 			button.Connect("clicked", func(item *gtk.Button) {
 				searchEntry.SetText("")
 				// !!! since gotk3 FlowBox type does not implement set_filter_func, we need to rebuild appFlowBox
-				appFlowBox = setUpAppsFlowBox(lists[name], "")
+				appFlowBox = filterApplications(deindex, func(e desktopEntry) bool {
+					return isIn(lists[name], e.DesktopID)
+				})
 				for _, btn := range catButtons {
 					btn.SetImagePosition(gtk.POS_LEFT)
 				}
@@ -182,10 +193,87 @@ func notEmpty(listCategory []string) bool {
 	return false
 }
 
-func setUpAppsFlowBox(categoryList []string, searchPhrase string) *gtk.FlowBox {
-	if appFlowBox != nil {
-		appFlowBox.Destroy()
+var (
+	cachedIconsSignal, _ = glib.SignalNew("icon-cache-warmed")
+	cachedIconsM         sync.Mutex
+	cachedIcons          map[string]*gtk.Image
+	missingIcon          *gtk.Image
+)
+
+func retrieveIconCache() map[string]*gtk.Image {
+	cachedIconsM.Lock()
+	defer cachedIconsM.Unlock()
+	if cachedIcons == nil {
+		cachedIcons = make(map[string]*gtk.Image)
 	}
+
+	return cachedIcons
+}
+
+type emitter interface {
+	Emit(s string, args ...interface{}) (interface{}, error)
+}
+
+func warmIconCache(w emitter, entries ...desktopEntry) {
+	cached := make(map[string]*gtk.Image, len(entries))
+	iconTheme, err := gtk.IconThemeGetDefault()
+	if err != nil {
+		log.Fatal("Couldn't get default theme: ", err)
+	}
+
+	for _, idx := range entries {
+		if idx.Icon == "" {
+			continue
+		}
+
+		pixbuf, err := createPixbuf(idx.Icon, *iconSize, iconTheme)
+		if err != nil {
+			log.Println("unable to load icon", err)
+			continue
+		}
+		img, err := gtk.ImageNewFromPixbuf(pixbuf)
+		if err != nil {
+			log.Println("unable to create img", err)
+			continue
+		}
+
+		cached[idx.Icon] = img
+	}
+
+	cachedIconsM.Lock()
+	cachedIcons = cached
+	cachedIconsM.Unlock()
+
+	if _, err := w.Emit(cachedIconsSignal.String()); err != nil {
+		log.Println("failed to emit cache warming", err)
+	}
+}
+
+func filterApplications(entries []desktopEntry, match func(desktopEntry) bool) *gtk.FlowBox {
+	defer func(w *gtk.FlowBox) {
+		if w != nil {
+			w.Destroy()
+		}
+	}(appFlowBox)
+
+	matches := make([]desktopEntry, 0, len(entries))
+	for _, e := range entries {
+		// skip entries that are marked as no display.
+		if e.NoDisplay {
+			continue
+		}
+
+		if match(e) {
+			matches = append(matches, e)
+			continue
+		}
+	}
+
+	return setUpAppsFlowBox(matches...)
+}
+
+func setUpAppsFlowBox(deindex ...desktopEntry) *gtk.FlowBox {
+
 	flowBox, _ := gtk.FlowBoxNew()
 	flowBox.SetMinChildrenPerLine(*columnsNumber)
 	flowBox.SetMaxChildrenPerLine(*columnsNumber)
@@ -194,55 +282,35 @@ func setUpAppsFlowBox(categoryList []string, searchPhrase string) *gtk.FlowBox {
 	flowBox.SetHomogeneous(true)
 	flowBox.SetSelectionMode(gtk.SELECTION_NONE)
 
-	for _, entry := range desktopEntries {
-		if searchPhrase == "" {
-			if !entry.NoDisplay {
-				if categoryList != nil {
-					if isIn(categoryList, entry.DesktopID) {
-						button := flowBoxButton(entry)
-						flowBox.Add(button)
-					}
-				} else {
-					button := flowBoxButton(entry)
-					flowBox.Add(button)
-				}
-			}
-		} else {
-			if !entry.NoDisplay && (strings.Contains(strings.ToLower(entry.NameLoc), strings.ToLower(searchPhrase)) ||
-				strings.Contains(strings.ToLower(entry.CommentLoc), strings.ToLower(searchPhrase)) ||
-				strings.Contains(strings.ToLower(entry.Comment), strings.ToLower(searchPhrase)) ||
-				strings.Contains(strings.ToLower(entry.Exec), strings.ToLower(searchPhrase))) {
-				button := flowBoxButton(entry)
-				flowBox.Add(button)
-			}
-		}
+	for _, entry := range deindex {
+		flowBox.Add(flowBoxButton(entry))
 	}
+
 	hWrapper, _ := gtk.BoxNew(gtk.ORIENTATION_HORIZONTAL, 0)
 	appSearchResultWrapper.PackStart(hWrapper, false, false, 0)
 	hWrapper.PackStart(flowBox, true, false, 0)
+
 	// While moving focus with arrow keys we want buttons to get focus directly
 	flowBox.GetChildren().Foreach(func(item interface{}) {
 		item.(*gtk.Widget).SetCanFocus(false)
 	})
+
 	resultWindow.ShowAll()
 
 	return flowBox
 }
 
 func flowBoxButton(entry desktopEntry) *gtk.Button {
+	cached := retrieveIconCache()
 	button, _ := gtk.ButtonNew()
-	button.SetAlwaysShowImage(true)
 
-	var img *gtk.Image
-	if entry.Icon != "" {
-		pixbuf, _ := createPixbuf(entry.Icon, *iconSize)
-		img, _ = gtk.ImageNewFromPixbuf(pixbuf)
-	} else {
-		img, _ = gtk.ImageNewFromIconName("image-missing", gtk.ICON_SIZE_INVALID)
+	button.SetAlwaysShowImage(true)
+	button.SetImage(missingIcon)
+	button.SetImagePosition(gtk.POS_TOP)
+	if img, ok := cached[entry.Icon]; ok {
+		button.SetImage(img)
 	}
 
-	button.SetImage(img)
-	button.SetImagePosition(gtk.POS_TOP)
 	name := entry.NameLoc
 	if len(name) > 20 {
 		r := []rune(name)
@@ -320,10 +388,14 @@ func setUpSearchEntry() *gtk.SearchEntry {
 
 		phrase, _ = searchEntry.GetText()
 		if len(phrase) > 0 {
-
 			// search apps
-			appFlowBox = setUpAppsFlowBox(nil, phrase)
-
+			appFlowBox = filterApplications(deindex, func(entry desktopEntry) bool {
+				searchPhrase := strings.ToLower(phrase)
+				return (strings.Contains(strings.ToLower(entry.NameLoc), searchPhrase) ||
+					strings.Contains(strings.ToLower(entry.CommentLoc), searchPhrase) ||
+					strings.Contains(strings.ToLower(entry.Comment), searchPhrase) ||
+					strings.Contains(strings.ToLower(entry.Exec), searchPhrase))
+			})
 			// search files
 			if !*noFS && len(phrase) > 2 {
 				if fileSearchResultFlowBox != nil {
@@ -376,7 +448,7 @@ func setUpSearchEntry() *gtk.SearchEntry {
 			}
 		} else {
 			// clear search results
-			appFlowBox = setUpAppsFlowBox(nil, "")
+			appFlowBox = filterApplications(deindex, func(entry desktopEntry) bool { return true })
 
 			if fileSearchResultFlowBox != nil {
 				fileSearchResultFlowBox.Destroy()
